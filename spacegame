@@ -1,0 +1,393 @@
+(
+s = Server.local;
+s.options.sampleRate_(44100);
+AppClock.clear;
+s.waitForBoot({
+	var title = "SuperSpaceCollider";
+	var win = Window.new(title, Window.screenBounds, false).fullscreen
+	.front
+	.onClose_({Window.closeAll; s.quit; AppClock.clear; SystemClock.clear; ~enemySpawn.stop});
+
+	var winW = win.view.bounds.width, winH = win.view.bounds.height;
+
+	var keycodes = Platform.case(
+		//<-, ->, ↓, ↑
+		\osx, {[123,124,125,126,49]},
+		\linux, {[65361,65363,65364,65362,32]},
+		\windows, {[37,39,40,38,32]}
+	);
+
+	//colors
+
+	var spriteSize=36, maxRadius = 1.0;
+
+	var playerX=winW/2-spriteSize, playerY=win.view.bounds.height-(spriteSize*2);
+
+	var laserX = playerX, laserY = playerY, shipScale=1, laserWidth = spriteSize/12;
+
+	var board = UserView(win, win.view.bounds)
+	.background_(Color.blue(0.1));
+
+	//more vars
+
+	var activeLaser = Array(40), canFire=true, laserPos;
+
+	var starSpeed = 20;
+
+	var movementSpeed = 8, enemySpeed = 6, enemyTestRect;
+
+	var laserArray = Array(40);
+
+	var laserSpeed = movementSpeed*4, laserLen = spriteSize/2.4;
+
+	var playerDir = Set(1);
+
+	var enemyPos = 50.collect({[win.view.bounds.width.rand, (win.view.bounds.height).rand.neg]});
+
+	var enemyX = win.view.bounds.width.rand, enemyY=0;
+
+	var cannonWidth = spriteSize/12, cannonLength=0.6*spriteSize;
+
+	~flashAlpha = 0.0;
+	~flashSize = 0;
+	~fireDelay = 0.25;
+
+	~frameRate = 30;
+
+		//sounds
+
+	s.sync;
+
+
+SynthDef(\engine, {
+		arg freq=80, amp=0.5, gate=1, pan=0.5, filtFreq=1500, in=0;
+	var sig, env, detune, pitch, width, noise;
+	detune = 3.collect({0.5.rand2.midiratio});
+		width = LFNoise1.ar(LFNoise0.ar.range(1.0,4.0)).range(0.01,0.99);
+	pitch = freq*detune;
+		noise = WhiteNoise.ar(0.18);
+		noise = RLPF.ar(noise, 2000, 0.8);
+		sig = LFPulse.ar(pitch, 0, width, 1/6);
+	env = EnvGen.ar(Env.asr, gate, doneAction:2);
+		sig = HPF.ar(sig, 500);
+		sig = Mix.ar(sig);
+		sig = Mix.ar([sig, noise]);
+		sig = BPF.ar(sig, LFNoise1.ar(2).range(800,1000));
+		sig = RLPF.ar(sig, 500, 0.5);
+		sig = sig*amp*env;
+		// sig = LeakDC.ar(sig);
+	sig = Pan2.ar(sig, pan);
+	Out.ar(0, sig);
+}).add;
+
+	SynthDef(\pow, {
+		arg freq1=2000, freq2=20, dur=0.3, pan=0.5, gate=1, amp = 0.3;
+		var sig, env, line;
+		line = XLine.ar(freq1,freq2,dur);
+		sig =
+		10.collect({
+			arg i;
+			LFPulse.ar((line*(1.rand2).midiratio), 0)/5
+		});
+		sig = Mix.ar(sig).fold(-1.0,1.0);
+		env = EnvGen.ar(Env.perc(0.01,dur*2), gate, doneAction:2);
+		sig = BPF.ar(sig);
+		sig = (sig * amp * env);
+		sig = Pan2.ar(sig, pan);
+		Out.ar(0, sig);
+	}).add;
+
+
+
+SynthDef(\explosion, {
+	arg amp=0.6, pan=0, freq=30, noiseAmp=0.16, noiseAmp2=0.5, lpfFreq=1748, hpfFreq=40, dur=3;
+	var sig, env, noise, fold;
+		noise = Mix.ar([ClipNoise.ar(noiseAmp), BrownNoise.ar(noiseAmp2)]);
+	sig = 7.collect({
+		LFPulse.ar(LFNoise1.ar.range(21.0,35.0), 1.0.rand, LFNoise1.ar(1).range(0.01,0.99));
+	});
+	fold = EnvGen.ar(Env([0.1,0.8],[0.4],-4.0.rand));
+	sig = Splay.ar(sig);
+	sig = Mix.ar([sig,noise]);
+	sig = sig.fold(fold.neg,fold);
+	sig = sig.round(2.pow(-4.rand));
+	env = EnvGen.ar(Env.perc(0.001,dur), doneAction:2);
+	sig = sig.clip(-1,1);
+		sig = CombL.ar(sig, 0.2, 0.2, 1.0);
+	sig = sig*env*amp;
+	sig = LPF.ar(sig, lpfFreq);
+	sig = HPF.ar(sig, hpfFreq);
+	sig = LeakDC.ar(sig);
+	sig = Pan2.ar(sig, pan);
+	Out.ar(0, sig);
+}).add;
+
+
+//draw stars
+~starArray = 500.collect({
+		x = win.view.bounds.width.rand;
+z = win.view.bounds.height.rand;
+	r = exprand(0.3,2.0);
+	[[x,z,r],[x,(win.view.bounds.height.neg+z),r]];
+}).flatten(1);
+
+	~starY = 0;
+
+	~stars = UserView(win, win.view.bounds)
+.animate_(true)
+	.clearOnRefresh_(true)
+	.frameRate_(~frameRate/2)
+.drawFunc_({
+	~starY = (~starY+1).wrap(0,win.view.bounds.height);
+	Pen.translate(0, ~starY);
+		Pen.use({
+	~starArray.do({
+	arg item;
+	Pen.addOval(Rect(
+			item.at(0), item.at(1),
+			item.at(2), item.at(2)
+		)
+		)
+		.color_([Color.grey(exprand(0.8,1.0)), Color.white].wchoose([0.1,0.8]))
+		.fill;
+			});
+});
+});
+
+
+	~engineSynth = Synth(\engine);
+
+	s.sync;
+
+	// ~powSynth = {Synth(\pow, [\pan, playerX.linlin(0, win.view.bounds.width,-0.9,0.9)])};
+
+	~laserSynth = {canFire = false; Synth(\pow, [\pan, playerX.linlin(0, win.view.bounds.width,-0.9,0.9)]);};
+
+	~laserView = UserView.new(~stars, win.view.bounds)
+.animate_(true)
+.frameRate_(60)
+.drawFunc_({
+	laserArray.collectInPlace({
+		arg item, i;
+		var laserHitBox;
+		x = item.at(0);
+		y = item.at(1);
+			y = y-laserSpeed;
+			laserHitBox = Rect.fromPoints(x+(cannonWidth/2) @ (y+cannonLength), x+spriteSize-(cannonWidth/2) @ (y+spriteSize));
+			2.do({
+				arg i;
+				Pen.line([laserHitBox.rightTop, laserHitBox.leftTop].at(i), [laserHitBox.rightBottom, laserHitBox.leftBottom].at(i));
+			});
+			Pen.width_(cannonWidth).capStyle_(1).color_(Color.cyan).stroke;
+			[x, y];
+		});
+		laserArray = laserArray.select({arg item, i; item.at(1)>laserLen.neg});
+		~hitBox = laserArray.collect({ 
+			arg item, i;
+		x = item.at(0);
+		y = item.at(1);
+			Rect.fromPoints(x+(cannonWidth/2) @ (y+cannonLength), x+spriteSize-(cannonWidth/2) @ (y+spriteSize))
+		});
+});
+
+	~playerSprite = UserView(~stars, win.view.bounds)
+	.animate_(true)
+	.frameRate_(~frameRate)
+	.drawFunc_({
+		var cockpitH = spriteSize/3, cockpitW = spriteSize/7;
+		var numLines = 4;
+		var propulsionSize = rrand(15.0,20.0);
+		var h = spriteSize/2, delta=rrand(0.1, 0.3)*spriteSize/6, height = exprand(0.4,(1/4))*spriteSize, tip = h+rand2(delta/2)@(spriteSize+height);
+		//movement
+		playerDir.do({
+			arg item;
+			case
+			{item == (\left)} {playerX=playerX-movementSpeed}
+			{item == (\right)} {playerX=playerX+movementSpeed}
+			{item == (\down)} {playerY=playerY+movementSpeed}
+			{item == (\up)} {playerY=playerY-movementSpeed};
+		});
+		playerY=playerY.clip(0, win.view.bounds.height-spriteSize);
+		playerX=playerX.clip(0, win.view.bounds.width-spriteSize);
+		Pen.translate(playerX, playerY);
+
+		//draw
+
+		//propulsion
+		Pen.use({
+		Pen
+		.moveTo((spriteSize/2)-(spriteSize/15) @ (spriteSize))
+		.quadCurveTo((spriteSize/2)+(spriteSize/15) @ (spriteSize), (tip.x) @ (tip.y*(pi/2).sqrt))
+		.lineTo((spriteSize/2)-(spriteSize/15) @ (spriteSize))
+		.fillAxialGradient((spriteSize/2) @ (spriteSize), (spriteSize/2) @ (tip.y), Color.cyan(1,1.0), Color.cyan(1.0,0));
+
+		Pen
+		.addOval(Rect.aboutPoint(spriteSize/2 @ (spriteSize), spriteSize/propulsionSize, spriteSize/propulsionSize)).color_(Color.cyan).fill;
+		});
+
+		2.do{
+			arg i;
+			Pen
+			.moveTo(h + [delta.neg, delta].at(i) @ spriteSize)
+			.quadCurveTo(tip, h + [delta.neg, delta].at(i) @ (spriteSize+delta.rand))
+			.lineTo(h + [delta, delta.neg].at(i)@spriteSize)
+			.fillAxialGradient(tip, h @ (spriteSize-delta), Color.blue, Color.cyan(1.5))
+		};
+		Pen.addOval(Rect.aboutPoint(h@spriteSize, delta, delta)).fillAxialGradient(tip, h @ (spriteSize-delta), Color.cyan, Color.white);
+Pen.use({
+		//wings
+			
+			Pen.use({
+		2.do({
+			arg i;
+			var ratio = (5/8);
+			Pen
+			.moveTo(spriteSize/2 @ (0.875*spriteSize))
+			.lineTo(i*spriteSize @ spriteSize)
+			.lineTo(i*spriteSize @ (15*spriteSize/16))
+			.quadCurveTo(spriteSize/2 @ (spriteSize/4.neg), spriteSize/2 @ (spriteSize*ratio))
+			.fillColor_(Color.grey(0.3))
+			.strokeColor_(Color.grey(0.2))
+			.fill
+		});
+
+		//decor
+		numLines.do({
+			arg i;
+			Pen
+			.line(spriteSize/numLines*(i+0.5) @ spriteSize, spriteSize/numLines*(i+0.5) @ (7*spriteSize/10))
+			.strokeColor_(Color.grey)
+			.width_(spriteSize/18)
+			.stroke
+		});
+		});
+
+		~flashAlpha = ~flashAlpha - (0.1);
+
+
+
+			//cannon flash
+			2.do({
+				arg i;
+			~flashSize = exprand(spriteSize/12.0, spriteSize/24.0);
+			Pen
+			.addOval(~flashRect = Rect.aboutPoint(((i*spriteSize)+[(cannonWidth/2),(cannonWidth/2).neg].at(i))@((0.6*spriteSize)-(~flashSize)), ~flashSize, ~flashSize*1.5) )
+			.color_(Color.cyan(1.8, ~flashAlpha))
+			.fillAxialGradient(((i*spriteSize)+[(cannonWidth/2),(cannonWidth/2).neg].at(i))@(cannonLength), ((i*spriteSize)+[(cannonWidth/2),(cannonWidth/2).neg].at(i))@(cannonLength-(~flashSize*2)),Color.white.alpha_(~flashAlpha), Color.cyan(1,0.5*~flashAlpha));
+			});
+
+Pen.use({
+
+		//cannons
+		2.do({
+			arg i;
+			Pen
+				.line(((i*spriteSize)+[(cannonWidth/2),(cannonWidth/2).neg].at(i))  @ spriteSize, ((i*spriteSize)+[(cannonWidth/2),(cannonWidth/2).neg].at(i)) @ (cannonLength))
+			.strokeColor_(Color.grey)
+			.width_(cannonWidth)
+			.stroke
+		});
+
+		//body
+		2.do({
+			arg i;
+			Pen
+			.moveTo((spriteSize/2) @ 0)
+			.quadCurveTo(spriteSize/2 @ (spriteSize), spriteSize/4+(i*spriteSize/2) @ (spriteSize/2))
+			.width_(spriteSize/36)
+			.fillAxialGradient(spriteSize/2 @ 0, spriteSize/2 @ spriteSize, Color.grey(0.6), Color.grey(0.3))
+		});
+
+		//jet
+
+		Pen
+		.addRoundedRect(~jetRect = Rect.aboutPoint(spriteSize/2 @ (0.9*spriteSize), spriteSize/15, spriteSize/8), ~jetRect.width/2, ~jetRect.height/4)
+		.fillAxialGradient(~jetRect.left@(~jetRect.height/2), ~jetRect.right@(~jetRect.height/2), Color.grey(0.7), Color.grey(0.5));
+
+
+		//cockpit
+		Pen.addOval(Rect(spriteSize-cockpitW/2, (0.4*spriteSize), cockpitW, cockpitH))
+		.fillAxialGradient(spriteSize-cockpitW/2 @ (4*spriteSize/10), spriteSize-(cockpitW/2+cockpitW) @ ((4*spriteSize/10)+cockpitH), Color.white, Color.cyan(0.5))
+		.strokeColor_(Color.grey(0.7))
+		.width_(2)
+		.stroke;
+		});
+		});
+	})
+	.background_(Color.clear);
+
+	
+	~fireFunc = {
+		{canFire = false;
+		~laserSynth.value;
+		laserArray.add([playerX, playerY+laserLen]);
+		~flashSize = (spriteSize/24.0);
+		~flashAlpha = 1.0;
+		0.25.wait;
+		canFire=true;
+	}.fork(AppClock)
+	};
+
+	View.globalKeyDownAction_({
+		arg view, char, mod, uni, keycode;
+		case
+		{keycode == keycodes[0]} {playerDir.add(\left);}
+		{keycode == keycodes[1]} {playerDir.add(\right);}
+		{keycode == keycodes[2]} {playerDir.add(\down);}
+		{keycode == keycodes[3]} {playerDir.add(\up);}
+		{keycode == keycodes[4] && canFire==true} {~fireFunc.value}
+
+		// {mod.isShift} {movementSpeed = 16}
+		{uni == 27} {win.close; win.refresh};
+	});
+	View.globalKeyUpAction_({
+		arg view, char, mod, uni, keycode;
+		case
+		{keycode == keycodes[0]} {playerDir.remove(\left);}
+		{keycode == keycodes[1]} {playerDir.remove(\right);}
+		{keycode == keycodes[2]} {playerDir.remove(\down);}
+		{keycode == keycodes[3]} {playerDir.remove(\up);}
+		{keycode == keycodes[4]} {}
+	});
+
+	~enemyArray = Array(40);
+	~enemySpeed = 8;
+
+~enemySpawn = fork {
+	loop {
+		~enemyArray.add([winW.rand, 0]);
+		rrand(2.0,0.5).wait;
+	}
+};
+~enemies = UserView(~stars, win.view.bounds)
+.background_(Color.clear)
+.animate_(true)
+.drawFunc_({
+	~enemyArray = ~enemyArray.collect({
+			arg inval;
+			var x = inval.at(0), y = inval.at(1);
+			y = y+~enemySpeed;
+			[x, y];
+		});
+		~enemyArray = ~enemyArray.select({
+			arg inval;
+			var x = inval.at(0), y = inval.at(1);
+			y<(winH-(spriteSize/2)+(10*spriteSize));
+		});
+		~enemyRectArray = ~enemyArray.collect({
+			arg inval;
+			var x = inval.at(0), y = inval.at(1);
+			Rect.aboutPoint(x@y, spriteSize/2, spriteSize/2);
+		});
+	~enemyRectArray.do({
+					arg inval; 
+			var maxTail = 10.0, tailX = inval.center.x+(rand2(inval.width/2)), tailHeight = inval.height*rrand(5.0,maxTail), tailY = (inval.top-(tailHeight)), tip = tailX @ tailY, dev = rrand(inval.height, 8/9*inval.height).neg;
+		Pen.moveTo(inval.left - dev @ inval.center.y)
+		.quadCurveTo(inval.right + dev @ inval.center.y, tip)
+			.fillRadialGradient(inval.center, inval.center, 1, inval.height/2 + tailHeight, Color.yellow(1.0,0.9), Color.red(1.0,0.3));
+			Pen.addOval(inval).fillRadialGradient(inval.center.x @ inval.bottom, inval.center.x @ inval.bottom, 1, inval.height, Color.fromHexString("#964B00"), Color.fromHexString("#654321"))
+		});
+});
+	win.refresh;
+});
+)
