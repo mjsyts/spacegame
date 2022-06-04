@@ -4,7 +4,7 @@ s.options.sampleRate_(44100);
 AppClock.clear;
 s.waitForBoot({
 	var title = "SuperSpaceCollider";
-	var win = Window.new(title, Window.screenBounds, false).fullscreen
+	var win = Window.new(title, Window.screenBounds, false).fullScreen
 	.front
 	.onClose_({Window.closeAll; s.quit; AppClock.clear; SystemClock.clear; ~enemySpawn.stop});
 
